@@ -281,7 +281,9 @@ func (s *controlledSelector) HandleBindingRequest(m *stun.Message, local, remote
 	}
 
 	s.agent.sendBindingSuccess(m, local, remote)
-	s.PingCandidate(local, remote)
+	if !s.agent.liteEnabled() {
+		s.PingCandidate(local, remote)
+	}
 
 	if s.agent.userBindingRequestHandler != nil {
 		if shouldSwitch := s.agent.userBindingRequestHandler(m, local, remote, p); shouldSwitch {

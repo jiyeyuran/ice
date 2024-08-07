@@ -7,6 +7,7 @@ package ice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -27,6 +28,8 @@ import (
 	"github.com/pion/transport/v3/vnet"
 	"golang.org/x/net/proxy"
 )
+
+var errMismatchUsername = errors.New("username mismatch")
 
 type bindingRequest struct {
 	timestamp      time.Time
@@ -321,8 +324,6 @@ func (a *Agent) startConnectivityChecks(isControlling bool, remoteUfrag, remoteP
 
 	return a.loop.Run(a.loop, func(_ context.Context) {
 		a.isControlling = isControlling
-		a.remoteUfrag = remoteUfrag
-		a.remotePwd = remotePwd
 
 		if isControlling {
 			a.selector = &controllingSelector{agent: a, log: a.log}
@@ -1028,7 +1029,7 @@ func (a *Agent) handleInbound(m *stun.Message, local Candidate, remote net.Addr)
 	} else if m.Type.Class == stun.ClassRequest {
 		a.log.Tracef("Inbound STUN (Request) from %s to %s, useCandidate: %v", remote, local, m.Contains(stun.AttrUseCandidate))
 
-		if err = stunx.AssertUsername(m, a.localUfrag+":"+a.remoteUfrag); err != nil {
+		if err = a.assertUsername(m); err != nil {
 			a.log.Warnf("Discard message from (%s), %v", remote, err)
 			return
 		} else if err = stun.MessageIntegrity([]byte(a.localPwd)).Check(m); err != nil {
@@ -1069,6 +1070,24 @@ func (a *Agent) handleInbound(m *stun.Message, local Candidate, remote net.Addr)
 	if remoteCandidate != nil {
 		remoteCandidate.seen(false)
 	}
+}
+
+func (a *Agent) liteEnabled() bool {
+	return a.lite && a.remoteUfrag == ""
+}
+
+func (a *Agent) assertUsername(m *stun.Message) error {
+	if a.liteEnabled() {
+		var username stun.Username
+		if err := username.GetFrom(m); err != nil {
+			return err
+		}
+		if !strings.HasPrefix(string(username), a.localUfrag+":") {
+			return fmt.Errorf("%w expected(%s) actual(%s)", errMismatchUsername, a.localUfrag, username)
+		}
+		return nil
+	}
+	return stunx.AssertUsername(m, a.localUfrag+":"+a.remoteUfrag)
 }
 
 // validateNonSTUNTraffic processes non STUN traffic from a remote candidate,
@@ -1125,11 +1144,14 @@ func (a *Agent) closeMulticastConn() {
 
 // SetRemoteCredentials sets the credentials of the remote agent
 func (a *Agent) SetRemoteCredentials(remoteUfrag, remotePwd string) error {
-	switch {
-	case remoteUfrag == "":
-		return ErrRemoteUfragEmpty
-	case remotePwd == "":
-		return ErrRemotePwdEmpty
+	// allow empty ufrag and pwd in lite mode.
+	if !a.lite {
+		switch {
+		case remoteUfrag == "":
+			return ErrRemoteUfragEmpty
+		case remotePwd == "":
+			return ErrRemotePwdEmpty
+		}
 	}
 
 	return a.loop.Run(a.loop, func(_ context.Context) {
